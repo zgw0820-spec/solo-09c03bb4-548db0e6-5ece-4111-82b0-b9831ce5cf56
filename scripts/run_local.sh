@@ -12,6 +12,10 @@ GW_PORT="${GW_PORT:-8000}"
 UP_A_PORT="${UP_A_PORT:-9001}"
 UP_B_PORT="${UP_B_PORT:-9002}"
 
+# smoke_test.py talks to the upstreams directly for the demo admin hooks
+export ALPHA_URL="http://127.0.0.1:$UP_A_PORT"
+export BETA_URL="http://127.0.0.1:$UP_B_PORT"
+
 rm -rf "$WORK"
 mkdir -p "$WORK"
 

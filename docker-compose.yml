@@ -6,6 +6,7 @@ services:
     environment:
       UPSTREAM_NAME: alpha
       DEFAULT_DELAY_MS: "3000"   # 默认响应延迟，可被请求参数 delay_ms 覆盖
+      WORK_RESULT: "ok"          # /work 业务结果值，运行时可改：POST /admin/work_result
     ports:
       - "9001:8000"
 
@@ -14,6 +15,7 @@ services:
     environment:
       UPSTREAM_NAME: beta
       DEFAULT_DELAY_MS: "500"
+      WORK_RESULT: "ok"
     ports:
       - "9002:8000"
 

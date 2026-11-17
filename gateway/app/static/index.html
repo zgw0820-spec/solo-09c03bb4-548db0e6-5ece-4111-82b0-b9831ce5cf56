@@ -15,9 +15,10 @@
   header .summary b { color: #ffd166; }
   main { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; padding: 16px 24px; }
   section { background: #fff; border: 1px solid #dde3ea; border-radius: 8px; padding: 14px 16px; }
+  section.wide { grid-column: 1 / -1; }
   section h2 { margin: 0 0 10px; font-size: 16px; }
   table { border-collapse: collapse; width: 100%; font-size: 14px; }
-  th, td { border: 1px solid #e3e8ee; padding: 6px 8px; text-align: left; }
+  th, td { border: 1px solid #e3e8ee; padding: 6px 8px; text-align: left; vertical-align: top; }
   th { background: #f0f3f7; }
   tr.cur td { background: #e8f6ec; }
   tr.draining td { background: #fff6e0; }
@@ -26,6 +27,11 @@
   .badge.cur { background: #1f9d55; color: #fff; }
   .badge.draining { background: #e8a13a; color: #fff; }
   .badge.offlinable { background: #607d8b; color: #fff; }
+  .badge.match { background: #1f9d55; color: #fff; }
+  .badge.mismatch { background: #b3261e; color: #fff; }
+  .badge.incomparable { background: #e8a13a; color: #fff; }
+  .badge.pending { background: #1266a8; color: #fff; }
+  .badge.interrupted { background: #607d8b; color: #fff; }
   button { padding: 6px 14px; border: 0; border-radius: 6px; background: #1266a8;
            color: #fff; cursor: pointer; font-size: 14px; }
   button:disabled { background: #9db4c6; cursor: not-allowed; }
@@ -36,6 +42,9 @@
   .msg.ok { color: #1f7a3d; }
   .msg.err { color: #b3261e; }
   .muted { color: #6b7a89; font-size: 12px; }
+  .detail { font-size: 12px; color: #4a5a6a; }
+  .detail code { background: #f0f3f7; padding: 1px 4px; border-radius: 4px;
+                 word-break: break-all; }
   #req-log li.done { color: #1f7a3d; }
   #req-log li.fail { color: #b3261e; }
 </style>
@@ -68,6 +77,29 @@
     <ul id="probe-log"></ul>
   </section>
 
+  <section class="wide">
+    <h2>旁路对照（影子请求）</h2>
+    <div>
+      候选目标 <select id="shadow-candidate"></select>
+      <button onclick="shadowEnable()">开启对照</button>
+      <button onclick="shadowDisable()">关闭对照</button>
+      <span class="muted">开启后，新接纳的 GET /work 请求同时发往接单时的主目标与候选；客户端只等主目标，候选慢/超时/失败不影响主响应</span>
+    </div>
+    <div class="msg" id="shadow-msg"></div>
+    <div class="muted" id="shadow-status" style="margin:6px 0"></div>
+    <table>
+      <thead><tr>
+        <th>轮次</th><th>请求</th><th>主目标 · HTTP</th><th>候选 · HTTP</th>
+        <th>结论</th><th>业务 JSON 差异 / 说明</th>
+      </tr></thead>
+      <tbody id="shadow-body"></tbody>
+    </table>
+    <div class="muted" style="margin-top:6px">
+      比较时忽略 upstream、ts、delay_ms；任一端传输失败或回包无法解析时显示“无法比较”，不会报一致。
+      记录绑定接单时的两端目标与轮次：切换路由、关闭或重开对照后，迟到结果仍归原轮次。
+    </div>
+  </section>
+
   <section>
     <h2>上游与在途数</h2>
     <table>
@@ -87,6 +119,18 @@ let state = null;
 let lastProbe = null;   // {target, base_version, probe_id, ok}
 let reqSeq = 0;
 const $ = (id) => document.getElementById(id);
+
+const REASONS = {
+  primary_transport_error: '主目标传输失败',
+  candidate_transport_error: '候选传输失败',
+  both_transport_error: '两端传输均失败',
+  primary_body_not_json: '主目标回包无法解析',
+  candidate_body_not_json: '候选回包无法解析',
+  both_body_not_json: '两端回包均无法解析',
+  status_differs: 'HTTP 状态不同',
+  body_differs: '业务 JSON 不同',
+  status_and_body_differ: 'HTTP 状态与业务 JSON 均不同',
+};
 
 async function api(method, path, body) {
   const opt = { method, headers: {} };
@@ -115,6 +159,8 @@ function render() {
              `更新于 ${new Date(r.updated_at * 1000).toLocaleTimeString()}`;
   if (state.boot && state.boot.cleared_inflight)
     html += ` · 本次启动已清理中断在途 ${state.boot.cleared_inflight} 条`;
+  if (state.boot && state.boot.interrupted_shadow)
+    html += ` · 上次中断对照 ${state.boot.interrupted_shadow} 条`;
   $('route-summary').innerHTML = html;
 
   $('upstream-body').innerHTML = state.upstreams.map(u => {
@@ -126,11 +172,13 @@ function render() {
            `<td>${u.is_current ? '当前' : '旧'}</td><td>${u.inflight}</td><td>${badge}</td></tr>`;
   }).join('');
 
-  const sel = $('candidate');
-  const prev = sel.value;
-  sel.innerHTML = state.upstreams.filter(u => !u.is_current)
-    .map(u => `<option value="${esc(u.name)}">${esc(u.name)}</option>`).join('');
-  if ([...sel.options].some(o => o.value === prev)) sel.value = prev;
+  for (const id of ['candidate', 'shadow-candidate']) {
+    const sel = $(id);
+    const prev = sel.value;
+    sel.innerHTML = state.upstreams.filter(u => !u.is_current)
+      .map(u => `<option value="${esc(u.name)}">${esc(u.name)}</option>`).join('');
+    if ([...sel.options].some(o => o.value === prev)) sel.value = prev;
+  }
 
   $('inflight-list').innerHTML = state.inflight.map(x =>
     `<li>#${x.id.slice(0,8)} → <b>${esc(x.target)}</b> ${esc(x.path)} · 已进行 ${x.age_ms}ms</li>`
@@ -141,7 +189,60 @@ function render() {
     `@页面版号 v${p.base_version} → ${p.ok ? '成功' : '失败 ' + esc(p.detail.error || JSON.stringify(p.detail))}</li>`
   ).join('') || '<li class="muted">（暂无）</li>';
 
+  renderShadow();
   updateSwitchPanel();
+}
+
+function renderShadow() {
+  const sh = state.shadow;
+  let txt;
+  if (!sh.enabled) {
+    txt = `对照已关闭 · 最近轮次 ${sh.round}` + (sh.candidate ? `（上轮候选 ${sh.candidate}）` : '');
+  } else if (sh.effective) {
+    txt = `对照开启中 · 轮次 ${sh.round} · 候选 ${sh.candidate} · 新接纳的 /work 请求将同时发往 ` +
+          `${state.route.current_target} 与 ${sh.candidate}`;
+  } else {
+    txt = `对照开启中 · 轮次 ${sh.round} · 候选 ${sh.candidate}，但候选已成为主目标，新请求不再旁路`;
+  }
+  $('shadow-status').textContent = txt;
+
+  $('shadow-body').innerHTML = state.shadow_records.map(rec => {
+    const side = (target, s, pendingText) => {
+      if (!s) return `${esc(target)} · ${pendingText}`;
+      return `${esc(target)} · ${s.error ? '传输失败' : s.status}`;
+    };
+    const pCell = side(rec.primary_target, rec.primary, '…');
+    const cCell = side(rec.candidate_target, rec.candidate,
+                       rec.status === 'pending' ? '等待中' : '…');
+    let verdict, detail;
+    if (rec.status === 'pending') {
+      verdict = '<span class="badge pending">等待中</span>';
+      detail = '候选回包等待中…';
+    } else if (rec.status === 'interrupted') {
+      verdict = '<span class="badge interrupted">中断</span>';
+      detail = '网关重启前未完成，已中断';
+    } else if (rec.verdict === 'match') {
+      verdict = '<span class="badge match">一致</span>';
+      detail = '业务 JSON 相同（已忽略 upstream/ts/delay_ms）';
+    } else if (rec.verdict === 'mismatch') {
+      verdict = '<span class="badge mismatch">不一致</span>';
+      const bits = [];
+      if (rec.diff_keys && rec.diff_keys.length)
+        bits.push('不同字段: ' + rec.diff_keys.map(esc).join(', '));
+      if (rec.reason && rec.reason.indexOf('status') >= 0) bits.push('HTTP 状态不同');
+      if (rec.primary && rec.primary.business !== undefined)
+        bits.push(`主: <code>${esc(JSON.stringify(rec.primary.business))}</code>`);
+      if (rec.candidate && rec.candidate.business !== undefined)
+        bits.push(`候: <code>${esc(JSON.stringify(rec.candidate.business))}</code>`);
+      detail = bits.join('<br>');
+    } else {
+      verdict = '<span class="badge incomparable">无法比较</span>';
+      detail = REASONS[rec.reason] || rec.reason || '无法比较';
+    }
+    return `<tr><td>${rec.round}</td><td>#${rec.id.slice(0,8)}</td>` +
+           `<td>${pCell}</td><td>${cCell}</td><td>${verdict}</td>` +
+           `<td class="detail">${detail}</td></tr>`;
+  }).join('') || '<tr><td colspan="6" class="muted">（暂无对照记录，开启对照后发起请求即可看到）</td></tr>';
 }
 
 function updateSwitchPanel() {
@@ -195,6 +296,34 @@ async function doCommit() {
   await refresh();
 }
 
+async function shadowEnable() {
+  const candidate = $('shadow-candidate').value;
+  const msg = $('shadow-msg');
+  if (!candidate) { msg.className = 'msg err'; msg.textContent = '没有可对照的候选目标'; return; }
+  const { status, body } = await api('POST', '/api/shadow/enable', { candidate });
+  if (body && body.ok) {
+    msg.className = 'msg ok';
+    msg.textContent = `已开启旁路对照：候选 ${candidate}，轮次 ${body.shadow.round}（重开会进入新轮次）`;
+  } else {
+    msg.className = 'msg err';
+    msg.textContent = `开启失败：${body && body.error || status}`;
+  }
+  await refresh();
+}
+
+async function shadowDisable() {
+  const msg = $('shadow-msg');
+  const { body } = await api('POST', '/api/shadow/disable');
+  if (body && body.ok) {
+    msg.className = 'msg ok';
+    msg.textContent = '已关闭旁路对照；在途对照的迟到结果仍归原轮次';
+  } else {
+    msg.className = 'msg err';
+    msg.textContent = '关闭失败';
+  }
+  await refresh();
+}
+
 function logReq(text, cls) {
   const li = document.createElement('li');
   li.id = 'req-' + (++reqSeq);
@@ -212,7 +341,8 @@ async function fireOne(delay) {
   const li = document.getElementById(id);
   if (body && body.ok) {
     li.className = 'done';
-    li.textContent = `✓ #${body.request_id.slice(0,8)} 由 ${body.target} 完整返回 · 耗时 ${dt}ms · 上游延迟 ${body.upstream.delay_ms}ms`;
+    li.textContent = `✓ #${body.request_id.slice(0,8)} 由 ${body.target} 完整返回 · 耗时 ${dt}ms · 上游延迟 ${body.upstream.delay_ms}ms` +
+      (body.shadow ? ` · 旁路→${body.shadow.candidate}（轮次${body.shadow.round}）` : '');
   } else {
     li.className = 'fail';
     li.textContent = `✗ ${status} ${body && (body.error || '') || ''}`;
